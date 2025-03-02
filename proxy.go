@@ -79,7 +79,6 @@ func main() {
 	flag.Parse()
 	proxyAddr := fmt.Sprintf(":%d", *port)
 	http.HandleFunc("/v1/chat/completions", proxyHandler)
-	log.Printf("Proxy server listening on %s", proxyAddr)
 	log.Fatal(http.ListenAndServe(proxyAddr, nil))
 }
 
@@ -163,9 +162,6 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Log the complete response for debugging
-	log.Printf("Replicate full response: %s", string(respBody))
-
 	// If streaming is requested
 	if openAIReq.Stream {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -184,8 +180,6 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "No stream URL provided in Replicate response", http.StatusInternalServerError)
 			return
 		}
-
-		log.Printf("Connecting to stream URL: %s", streamURL)
 
 		// Stream the response from Replicate
 		handleReplicateStream(w, streamURL, token)
@@ -308,9 +302,6 @@ func handleReplicateStream(w http.ResponseWriter, streamURL string, token string
 		"Cache-Control": "no-store",
 	}
 
-	// Debug: Log that we started streaming
-	log.Printf("Starting to handle Replicate stream using SSE client library")
-
 	// Use a simple counter for the message chunks
 	chunkIndex := 0
 
@@ -318,14 +309,12 @@ func handleReplicateStream(w http.ResponseWriter, streamURL string, token string
 	go func() {
 		err := client.SubscribeChan("", events)
 		if err != nil {
-			log.Printf("Error subscribing to SSE stream: %v", err)
+			// Error handling is preserved but without logging
 		}
 	}()
 
 	// Process events as they come in
 	for event := range events {
-		log.Printf("Received event: %s, data: %s", string(event.Event), string(event.Data))
-
 		// Handle different event types
 		switch string(event.Event) {
 		case "output":
@@ -350,12 +339,9 @@ func handleReplicateStream(w http.ResponseWriter, streamURL string, token string
 				}
 
 				jsonChunk, _ := json.Marshal(chunk)
-				log.Printf("Sending chunk to client: %s", jsonChunk)
 				fmt.Fprintf(w, "data: %s\n\n", jsonChunk)
 				flusher.Flush()
 				chunkIndex++
-			} else {
-				log.Printf("Skipping pending message: %s", data)
 			}
 
 		case "done":
@@ -375,35 +361,26 @@ func handleReplicateStream(w http.ResponseWriter, streamURL string, token string
 			}
 
 			jsonChunk, _ := json.Marshal(chunk)
-			log.Printf("Sending final chunk to client: %s", jsonChunk)
 			fmt.Fprintf(w, "data: %s\n\n", jsonChunk)
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 			flusher.Flush()
-			log.Printf("Stream completed")
 			return
 
 		default:
-			log.Printf("Unhandled event type: %s", string(event.Event))
+			// No action needed for unhandled event types (removed logging)
 		}
 	}
-
-	log.Printf("Exiting handleReplicateStream function")
 }
 
 func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token string) {
 	// For non-streaming responses, we'd need to poll the prediction until it's complete
-	// This is a simplified version - in a real implementation, you'd want to add timeouts and error handling
 	client := &http.Client{}
-
-	log.Printf("[NON-STREAMING] Starting polling for prediction ID: %s", predictionID)
 
 	// Get the initial prediction to get the "get" URL
 	initialPollURL := fmt.Sprintf("https://api.replicate.com/v1/predictions/%s", predictionID)
-	log.Printf("[NON-STREAMING] Initial poll URL: %s", initialPollURL)
 
 	pollReq, err := http.NewRequest("GET", initialPollURL, nil)
 	if err != nil {
-		log.Printf("[NON-STREAMING] Error creating initial poll request: %v", err)
 		http.Error(w, "Error creating poll request: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -411,18 +388,15 @@ func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token s
 
 	pollResp, err := client.Do(pollReq)
 	if err != nil {
-		log.Printf("[NON-STREAMING] Error making initial poll request: %v", err)
 		http.Error(w, "Error polling prediction: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	respBody, _ := io.ReadAll(pollResp.Body)
 	pollResp.Body.Close()
-	log.Printf("[NON-STREAMING] Initial poll response: %s", string(respBody))
 
 	var initialPollResult map[string]interface{}
 	if err := json.Unmarshal(respBody, &initialPollResult); err != nil {
-		log.Printf("[NON-STREAMING] Error parsing initial poll response: %v", err)
 		http.Error(w, "Error parsing poll response: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -430,29 +404,23 @@ func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token s
 	// Extract the "get" URL from the response
 	urls, ok := initialPollResult["urls"].(map[string]interface{})
 	if !ok {
-		log.Printf("[NON-STREAMING] Error: 'urls' field not found or not a map in initial poll response")
 		http.Error(w, "Error extracting URLs from prediction response", http.StatusInternalServerError)
 		return
 	}
 
 	getURL, ok := urls["get"].(string)
 	if !ok || getURL == "" {
-		log.Printf("[NON-STREAMING] Warning: 'get' URL not found in initial poll response, falling back to constructed URL")
 		// Fall back to constructed URL if "get" URL is not available
 		getURL = initialPollURL
 	}
-
-	log.Printf("[NON-STREAMING] Using get URL for polling: %s", getURL)
 
 	pollCount := 0
 	for {
 		pollCount++
 		time.Sleep(1 * time.Second)
-		log.Printf("[NON-STREAMING] Poll attempt #%d for prediction %s", pollCount, predictionID)
 
 		pollReq, err := http.NewRequest("GET", getURL, nil)
 		if err != nil {
-			log.Printf("[NON-STREAMING] Error creating poll request: %v", err)
 			http.Error(w, "Error creating poll request: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -461,40 +429,33 @@ func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token s
 
 		pollResp, err := client.Do(pollReq)
 		if err != nil {
-			log.Printf("[NON-STREAMING] Error making poll request: %v", err)
 			http.Error(w, "Error polling prediction: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		respBody, _ := io.ReadAll(pollResp.Body)
 		pollResp.Body.Close()
-		log.Printf("[NON-STREAMING] Poll response (attempt #%d): %s", pollCount, string(respBody))
 
 		var pollResult map[string]interface{}
 		if err := json.Unmarshal(respBody, &pollResult); err != nil {
-			log.Printf("[NON-STREAMING] Error parsing poll response: %v", err)
 			http.Error(w, "Error parsing poll response: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		status, _ := pollResult["status"].(string)
-		log.Printf("[NON-STREAMING] Poll status (attempt #%d): %s", pollCount, status)
 
 		if status == "succeeded" {
 			// Extract the output, which could be a string or an array of strings
 			var output string
 
 			outputVal := pollResult["output"]
-			log.Printf("[NON-STREAMING] Output type: %T", outputVal)
 
 			switch val := outputVal.(type) {
 			case string:
 				// Direct string output
 				output = val
-				log.Printf("[NON-STREAMING] Output is a string, length: %d", len(output))
 			case []interface{}:
 				// Array of string chunks that need to be concatenated
-				log.Printf("[NON-STREAMING] Output is an array with %d elements", len(val))
 				var builder strings.Builder
 				for _, chunk := range val {
 					if strChunk, ok := chunk.(string); ok {
@@ -502,25 +463,9 @@ func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token s
 					}
 				}
 				output = builder.String()
-				log.Printf("[NON-STREAMING] Concatenated output string, length: %d", len(output))
 			default:
-				log.Printf("[NON-STREAMING] Unexpected output type: %T", outputVal)
-				outputJSON, _ := json.Marshal(outputVal)
-				log.Printf("[NON-STREAMING] Raw output value: %s", string(outputJSON))
 				http.Error(w, "Unexpected output format in prediction response", http.StatusInternalServerError)
 				return
-			}
-
-			// Check if we got any output content
-			if len(output) == 0 {
-				log.Printf("[NON-STREAMING] Warning: Empty output content")
-			}
-
-			log.Printf("[NON-STREAMING] Prediction succeeded! Output length: %d", len(output))
-			if len(output) > 100 {
-				log.Printf("[NON-STREAMING] Output preview (first 100 chars): %s...", output[:100])
-			} else {
-				log.Printf("[NON-STREAMING] Output: %s", output)
 			}
 
 			response := map[string]interface{}{
@@ -545,21 +490,15 @@ func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token s
 				},
 			}
 
-			responseJSON, _ := json.Marshal(response)
-			log.Printf("[NON-STREAMING] Sending response to client: %s", string(responseJSON))
-
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(response)
-			log.Printf("[NON-STREAMING] Response sent successfully")
 			return
 		} else if status == "failed" || status == "canceled" {
 			error, _ := pollResult["error"].(string)
-			log.Printf("[NON-STREAMING] Prediction failed: %s", error)
 			http.Error(w, fmt.Sprintf("Prediction failed: %s", error), http.StatusInternalServerError)
 			return
 		}
 
 		// Continue polling for other statuses like "starting", "processing"
-		log.Printf("[NON-STREAMING] Waiting for prediction to complete, current status: %s", status)
 	}
 }
