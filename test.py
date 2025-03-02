@@ -66,7 +66,7 @@ def non_streaming_chat_completion():
             {"role": "user", "content": "Write a short poem about coding."}
         ],
         stream=False,
-        max_tokens=200
+        max_tokens=1024
     )
     
     # Display the response
