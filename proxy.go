@@ -320,6 +320,7 @@ func handleReplicateStream(w http.ResponseWriter, body io.Reader) {
 
 	var currentEvent string
 	var currentData string
+	var streamDone bool = false
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -335,12 +336,22 @@ func handleReplicateStream(w http.ResponseWriter, body io.Reader) {
 			currentEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 			log.Printf("Found event type: %s", currentEvent)
 		} else if strings.HasPrefix(line, "data:") {
-			currentData = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			currentData = strings.TrimPrefix(line, "data:")
+			// Trim only one leading space if it exists
+			if len(currentData) > 0 && currentData[0] == ' ' {
+				currentData = currentData[1:]
+			}
 			log.Printf("Found data: %s", currentData)
 
 			// Process the event and data
 			if currentEvent != "" && currentData != "" {
-				processEvent(w, flusher, currentEvent, currentData, &chunkIndex)
+				if currentEvent == "done" {
+					processEvent(w, flusher, currentEvent, currentData, &chunkIndex)
+					streamDone = true
+					break // Exit the loop after processing "done" event
+				} else {
+					processEvent(w, flusher, currentEvent, currentData, &chunkIndex)
+				}
 
 				// Reset for next event
 				currentEvent = ""
@@ -351,11 +362,12 @@ func handleReplicateStream(w http.ResponseWriter, body io.Reader) {
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		log.Printf("Error reading stream: %v", err)
-	} else {
-		log.Printf("Scanner completed without error")
+	if !streamDone && scanner.Err() != nil {
+		log.Printf("Error reading stream: %v", scanner.Err())
+	} else if !streamDone {
+		log.Printf("Scanner completed without receiving 'done' event")
 	}
+
 	log.Printf("Exiting handleReplicateStream function")
 }
 
