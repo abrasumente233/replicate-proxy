@@ -10,15 +10,68 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const (
-	targetURL = "https://fast-api.snova.ai/v1/chat/completions"
+	replicateAPIURL = "https://api.replicate.com/v1/models/anthropic/claude-3.7-sonnet/predictions"
 )
 
 var (
 	port = flag.Int("port", 9876, "Port to run the proxy server on")
 )
+
+// OpenAI-compatible request structure
+type OpenAIRequest struct {
+	Messages          []Message              `json:"messages,omitempty"`
+	Prompt            string                 `json:"prompt,omitempty"`
+	Model             string                 `json:"model,omitempty"`
+	ResponseFormat    map[string]string      `json:"response_format,omitempty"`
+	Stop              interface{}            `json:"stop,omitempty"`
+	Stream            bool                   `json:"stream,omitempty"`
+	MaxTokens         int                    `json:"max_tokens,omitempty"`
+	Temperature       float64                `json:"temperature,omitempty"`
+	Tools             []interface{}          `json:"tools,omitempty"`
+	ToolChoice        interface{}            `json:"tool_choice,omitempty"`
+	Seed              int                    `json:"seed,omitempty"`
+	TopP              float64                `json:"top_p,omitempty"`
+	TopK              int                    `json:"top_k,omitempty"`
+	FrequencyPenalty  float64                `json:"frequency_penalty,omitempty"`
+	PresencePenalty   float64                `json:"presence_penalty,omitempty"`
+	RepetitionPenalty float64                `json:"repetition_penalty,omitempty"`
+	LogitBias         map[int]float64        `json:"logit_bias,omitempty"`
+	TopLogprobs       int                    `json:"top_logprobs,omitempty"`
+	MinP              float64                `json:"min_p,omitempty"`
+	TopA              float64                `json:"top_a,omitempty"`
+	Prediction        map[string]string      `json:"prediction,omitempty"`
+	Transforms        []string               `json:"transforms,omitempty"`
+	Models            []string               `json:"models,omitempty"`
+	Route             string                 `json:"route,omitempty"`
+	Provider          map[string]interface{} `json:"provider,omitempty"`
+}
+
+// Message structure for OpenAI format
+type Message struct {
+	Role       string      `json:"role"`
+	Content    interface{} `json:"content"`
+	Name       string      `json:"name,omitempty"`
+	ToolCallID string      `json:"tool_call_id,omitempty"`
+}
+
+// Replicate API request structure
+type ReplicateRequest struct {
+	Stream bool                   `json:"stream"`
+	Input  map[string]interface{} `json:"input"`
+}
+
+// Replicate API response structure for prediction creation
+type ReplicatePredictionResponse struct {
+	URLs struct {
+		Stream string `json:"stream"`
+	} `json:"urls"`
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
 
 func main() {
 	flag.Parse()
@@ -45,52 +98,186 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create a new request to the target URL
-	proxyReq, err := http.NewRequest(r.Method, targetURL, bytes.NewReader(body))
+	// Parse the OpenAI-compatible request
+	var openAIReq OpenAIRequest
+	if err := json.Unmarshal(body, &openAIReq); err != nil {
+		http.Error(w, "Error parsing request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Convert to Replicate request format
+	replicateReq := convertToReplicateRequest(openAIReq)
+	replicateReqBody, err := json.Marshal(replicateReq)
 	if err != nil {
-		http.Error(w, "Error creating proxy request", http.StatusInternalServerError)
+		http.Error(w, "Error creating Replicate request: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Create a new request to the Replicate API
+	proxyReq, err := http.NewRequest("POST", replicateAPIURL, bytes.NewReader(replicateReqBody))
+	if err != nil {
+		http.Error(w, "Error creating proxy request: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	// Set headers for the proxy request
 	proxyReq.Header.Set("Content-Type", "application/json")
-	proxyReq.Header.Set("Authorization", fmt.Sprintf("Basic %s", token))
+	proxyReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
-	// Send the request to the target server
+	// Send the request to Replicate API
 	client := &http.Client{}
 	resp, err := client.Do(proxyReq)
 	if err != nil {
-		http.Error(w, "Error sending request to target server", http.StatusInternalServerError)
+		http.Error(w, "Error sending request to Replicate API: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
 
-	// Check if the response is streamed
-	isStreaming := isStreamingResponse(body)
-
-	// Set response headers
-	for k, v := range resp.Header {
-		w.Header()[k] = v
-	}
-	w.WriteHeader(resp.StatusCode)
-
-	// Handle streaming or non-streaming response
-	if isStreaming {
-		handleStreamingResponse(w, resp.Body)
-	} else {
+	// If response is not successful, forward the error
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		w.WriteHeader(resp.StatusCode)
 		io.Copy(w, resp.Body)
+		return
+	}
+
+	// Parse the Replicate response to get the stream URL
+	var predictionResp ReplicatePredictionResponse
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, "Error reading Replicate response: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := json.Unmarshal(respBody, &predictionResp); err != nil {
+		http.Error(w, "Error parsing Replicate response: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// If streaming is requested
+	if openAIReq.Stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		// Stream the response from Replicate
+		streamReq, err := http.NewRequest("GET", predictionResp.URLs.Stream, nil)
+		if err != nil {
+			http.Error(w, "Error creating stream request: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		streamReq.Header.Set("Accept", "text/event-stream")
+		streamReq.Header.Set("Cache-Control", "no-store")
+
+		streamResp, err := client.Do(streamReq)
+		if err != nil {
+			http.Error(w, "Error connecting to Replicate stream: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer streamResp.Body.Close()
+
+		// Stream the response back to the client in OpenAI compatible format
+		handleReplicateStream(w, streamResp.Body)
+	} else {
+		// For non-streaming, we need to poll until the prediction is complete
+		pollAndReturnPrediction(w, predictionResp.ID, token)
 	}
 }
 
-func isStreamingResponse(body []byte) bool {
-	var requestData map[string]interface{}
-	if err := json.Unmarshal(body, &requestData); err != nil {
-		return false
+func convertToReplicateRequest(req OpenAIRequest) ReplicateRequest {
+	input := make(map[string]interface{})
+
+	// Handle either messages or prompt
+	if len(req.Messages) > 0 {
+		// Convert messages to a prompt string for Claude
+		prompt := formatMessagesAsPrompt(req.Messages)
+		input["prompt"] = prompt
+	} else if req.Prompt != "" {
+		input["prompt"] = req.Prompt
 	}
-	return requestData["stream"] == true
+
+	// Add additional parameters that Claude supports
+	if req.MaxTokens > 0 {
+		input["max_tokens"] = req.MaxTokens
+	}
+
+	if req.Temperature > 0 {
+		input["temperature"] = req.Temperature
+	}
+
+	// Handle stop tokens if provided
+	if req.Stop != nil {
+		input["stop_sequences"] = req.Stop
+	}
+
+	return ReplicateRequest{
+		Stream: req.Stream,
+		Input:  input,
+	}
 }
 
-func handleStreamingResponse(w http.ResponseWriter, body io.Reader) {
+func formatMessagesAsPrompt(messages []Message) string {
+	var prompt strings.Builder
+
+	for _, msg := range messages {
+		switch msg.Role {
+		case "system":
+			content := getMessageContent(msg.Content)
+			prompt.WriteString(fmt.Sprintf("System: %s\n\n", content))
+		case "user":
+			content := getMessageContent(msg.Content)
+			if msg.Name != "" {
+				prompt.WriteString(fmt.Sprintf("User %s: %s\n\n", msg.Name, content))
+			} else {
+				prompt.WriteString(fmt.Sprintf("Human: %s\n\n", content))
+			}
+		case "assistant":
+			content := getMessageContent(msg.Content)
+			if msg.Name != "" {
+				prompt.WriteString(fmt.Sprintf("Assistant %s: %s\n\n", msg.Name, content))
+			} else {
+				prompt.WriteString(fmt.Sprintf("Assistant: %s\n\n", content))
+			}
+		case "tool":
+			content := getMessageContent(msg.Content)
+			prompt.WriteString(fmt.Sprintf("Tool Response (%s): %s\n\n", msg.ToolCallID, content))
+		}
+	}
+
+	// Add the final assistant prompt
+	prompt.WriteString("Assistant: ")
+
+	return prompt.String()
+}
+
+func getMessageContent(content interface{}) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []interface{}:
+		// Handle content parts (text or image_url)
+		var result strings.Builder
+		for _, part := range v {
+			if contentMap, ok := part.(map[string]interface{}); ok {
+				if contentType, ok := contentMap["type"].(string); ok {
+					if contentType == "text" {
+						if text, ok := contentMap["text"].(string); ok {
+							result.WriteString(text)
+						}
+					} else if contentType == "image_url" {
+						result.WriteString("[Image attached]")
+					}
+				}
+			}
+		}
+		return result.String()
+	default:
+		jsonContent, _ := json.Marshal(content)
+		return string(jsonContent)
+	}
+}
+
+func handleReplicateStream(w http.ResponseWriter, body io.Reader) {
 	scanner := bufio.NewScanner(body)
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -98,15 +285,150 @@ func handleStreamingResponse(w http.ResponseWriter, body io.Reader) {
 		return
 	}
 
+	// Use a simple counter for the message chunks
+	chunkIndex := 0
+
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.TrimSpace(line) != "" {
-			fmt.Fprintf(w, "%s\n\n", line)
-			flusher.Flush()
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		// Parse the SSE event
+		if strings.HasPrefix(line, "event: ") {
+			eventType := strings.TrimPrefix(line, "event: ")
+
+			// Get the data line that follows the event
+			if scanner.Scan() {
+				dataLine := scanner.Text()
+				if strings.HasPrefix(dataLine, "data: ") {
+					data := strings.TrimPrefix(dataLine, "data: ")
+
+					if eventType == "output" {
+						// Skip " pending.*" or similar pending messages
+						if !strings.Contains(data, "pending") {
+							// Format as OpenAI compatible streaming format
+							chunk := map[string]interface{}{
+								"id":      fmt.Sprintf("chatcmpl-%d", time.Now().Unix()),
+								"object":  "chat.completion.chunk",
+								"created": time.Now().Unix(),
+								"model":   "claude-3.7-sonnet",
+								"choices": []map[string]interface{}{
+									{
+										"index": 0,
+										"delta": map[string]interface{}{
+											"content": data,
+										},
+										"finish_reason": nil,
+									},
+								},
+							}
+
+							jsonChunk, _ := json.Marshal(chunk)
+							fmt.Fprintf(w, "data: %s\n\n", jsonChunk)
+							flusher.Flush()
+							chunkIndex++
+						}
+					} else if eventType == "done" {
+						// Send final chunk with finish_reason
+						chunk := map[string]interface{}{
+							"id":      fmt.Sprintf("chatcmpl-%d", time.Now().Unix()),
+							"object":  "chat.completion.chunk",
+							"created": time.Now().Unix(),
+							"model":   "claude-3.7-sonnet",
+							"choices": []map[string]interface{}{
+								{
+									"index":         0,
+									"delta":         map[string]interface{}{},
+									"finish_reason": "stop",
+								},
+							},
+						}
+
+						jsonChunk, _ := json.Marshal(chunk)
+						fmt.Fprintf(w, "data: %s\n\n", jsonChunk)
+						fmt.Fprintf(w, "data: [DONE]\n\n")
+						flusher.Flush()
+					}
+				}
+			}
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
 		log.Printf("Error reading stream: %v", err)
+	}
+}
+
+func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token string) {
+	// For non-streaming responses, we'd need to poll the prediction until it's complete
+	// This is a simplified version - in a real implementation, you'd want to add timeouts and error handling
+	client := &http.Client{}
+
+	pollURL := fmt.Sprintf("https://api.replicate.com/v1/predictions/%s", predictionID)
+
+	for {
+		time.Sleep(1 * time.Second)
+
+		pollReq, err := http.NewRequest("GET", pollURL, nil)
+		if err != nil {
+			http.Error(w, "Error creating poll request: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		pollReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+
+		pollResp, err := client.Do(pollReq)
+		if err != nil {
+			http.Error(w, "Error polling prediction: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		var pollResult map[string]interface{}
+		if err := json.NewDecoder(pollResp.Body).Decode(&pollResult); err != nil {
+			pollResp.Body.Close()
+			http.Error(w, "Error parsing poll response: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		pollResp.Body.Close()
+
+		status, _ := pollResult["status"].(string)
+
+		if status == "succeeded" {
+			// Format the response similar to OpenAI's format
+			output, _ := pollResult["output"].(string)
+
+			response := map[string]interface{}{
+				"id":      fmt.Sprintf("chatcmpl-%d", time.Now().Unix()),
+				"object":  "chat.completion",
+				"created": time.Now().Unix(),
+				"model":   "claude-3.7-sonnet",
+				"choices": []map[string]interface{}{
+					{
+						"index": 0,
+						"message": map[string]interface{}{
+							"role":    "assistant",
+							"content": output,
+						},
+						"finish_reason": "stop",
+					},
+				},
+				"usage": map[string]interface{}{
+					"prompt_tokens":     0, // We don't have this information
+					"completion_tokens": 0, // We don't have this information
+					"total_tokens":      0, // We don't have this information
+				},
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(response)
+			return
+		} else if status == "failed" || status == "canceled" {
+			error, _ := pollResult["error"].(string)
+			http.Error(w, fmt.Sprintf("Prediction failed: %s", error), http.StatusInternalServerError)
+			return
+		}
+
+		// Continue polling for other statuses like "starting", "processing"
 	}
 }
