@@ -188,35 +188,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Connecting to stream URL: %s", streamURL)
 
 		// Stream the response from Replicate
-		streamReq, err := http.NewRequest("GET", streamURL, nil)
-		if err != nil {
-			http.Error(w, "Error creating stream request: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		streamReq.Header.Set("Accept", "text/event-stream")
-		streamReq.Header.Set("Cache-Control", "no-store")
-		streamReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-
-		streamResp, err := client.Do(streamReq)
-		if err != nil {
-			http.Error(w, "Error connecting to Replicate stream: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer streamResp.Body.Close()
-
-		// Check if the stream response is successful
-		if streamResp.StatusCode != http.StatusOK {
-			respBody, _ := io.ReadAll(streamResp.Body)
-			log.Printf("Stream response error: %d - %s", streamResp.StatusCode, string(respBody))
-			http.Error(w, fmt.Sprintf("Stream error: %d", streamResp.StatusCode), streamResp.StatusCode)
-			return
-		}
-
-		log.Printf("Stream connection established, starting to handle stream")
-
-		// Stream the response back to the client in OpenAI compatible format
-		handleReplicateStream(w, streamResp.Body)
+		handleReplicateStream(w, streamURL, token)
 	} else {
 		// For non-streaming, we need to poll until the prediction is complete
 		pollAndReturnPrediction(w, predictionID, token)
@@ -316,7 +288,7 @@ func getMessageContent(content interface{}) string {
 	}
 }
 
-func handleReplicateStream(w http.ResponseWriter, body io.Reader) {
+func handleReplicateStream(w http.ResponseWriter, streamURL string, token string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
@@ -326,64 +298,29 @@ func handleReplicateStream(w http.ResponseWriter, body io.Reader) {
 	// Set up event channel
 	events := make(chan *sse.Event)
 
-	// Create a new SSE event stream reader with a 1MB buffer
-	reader := sse.NewEventStreamReader(body, 1024*1024)
+	// Create a new SSE client
+	client := sse.NewClient(streamURL)
 
-	// Start reading events in a separate goroutine
-	go func() {
-		defer close(events)
-
-		for {
-			// Read raw event data
-			raw, err := reader.ReadEvent()
-			if err != nil {
-				if err != io.EOF {
-					log.Printf("Error reading SSE event: %v", err)
-				}
-				return
-			}
-
-			// Skip empty events
-			if len(raw) == 0 {
-				continue
-			}
-
-			// Parse the event
-			event := &sse.Event{}
-
-			// Split the event data by newlines
-			lines := bytes.Split(raw, []byte("\n"))
-			for _, line := range lines {
-				if len(line) == 0 {
-					continue
-				}
-
-				// Check for event field
-				if bytes.HasPrefix(line, []byte("event:")) {
-					event.Event = bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:")))
-				} else if bytes.HasPrefix(line, []byte("data:")) {
-					// Check for data field
-					data := bytes.TrimPrefix(line, []byte("data:"))
-					// Trim only one leading space if it exists
-					if len(data) > 0 && data[0] == ' ' {
-						data = data[1:]
-					}
-					event.Data = data
-				}
-			}
-
-			// Only send non-empty events
-			if len(event.Event) > 0 || len(event.Data) > 0 {
-				events <- event
-			}
-		}
-	}()
+	// Set authorization header
+	client.Headers = map[string]string{
+		"Authorization": fmt.Sprintf("Bearer %s", token),
+		"Accept":        "text/event-stream",
+		"Cache-Control": "no-store",
+	}
 
 	// Debug: Log that we started streaming
-	log.Printf("Starting to handle Replicate stream")
+	log.Printf("Starting to handle Replicate stream using SSE client library")
 
 	// Use a simple counter for the message chunks
 	chunkIndex := 0
+
+	// Start subscription in a goroutine
+	go func() {
+		err := client.SubscribeChan("", events)
+		if err != nil {
+			log.Printf("Error subscribing to SSE stream: %v", err)
+		}
+	}()
 
 	// Process events as they come in
 	for event := range events {
