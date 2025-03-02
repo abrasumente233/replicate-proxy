@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"flag"
@@ -11,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/r3labs/sse/v2"
 )
 
 const (
@@ -316,83 +317,112 @@ func getMessageContent(content interface{}) string {
 }
 
 func handleReplicateStream(w http.ResponseWriter, body io.Reader) {
-	scanner := bufio.NewScanner(body)
-	// Increase the buffer size to handle larger chunks
-	const maxScanTokenSize = 1024 * 1024 // 1MB
-	buf := make([]byte, maxScanTokenSize)
-	scanner.Buffer(buf, maxScanTokenSize)
-
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
 		return
 	}
 
-	// Use a simple counter for the message chunks
-	chunkIndex := 0
+	// Set up event channel
+	events := make(chan *sse.Event)
+
+	// Create a new SSE event stream reader with a 1MB buffer
+	reader := sse.NewEventStreamReader(body, 1024*1024)
+
+	// Start reading events in a separate goroutine
+	go func() {
+		defer close(events)
+
+		for {
+			// Read raw event data
+			raw, err := reader.ReadEvent()
+			if err != nil {
+				if err != io.EOF {
+					log.Printf("Error reading SSE event: %v", err)
+				}
+				return
+			}
+
+			// Skip empty events
+			if len(raw) == 0 {
+				continue
+			}
+
+			// Parse the event
+			event := &sse.Event{}
+
+			// Split the event data by newlines
+			lines := bytes.Split(raw, []byte("\n"))
+			for _, line := range lines {
+				if len(line) == 0 {
+					continue
+				}
+
+				// Check for event field
+				if bytes.HasPrefix(line, []byte("event:")) {
+					event.Event = bytes.TrimSpace(bytes.TrimPrefix(line, []byte("event:")))
+				} else if bytes.HasPrefix(line, []byte("data:")) {
+					// Check for data field
+					data := bytes.TrimPrefix(line, []byte("data:"))
+					// Trim only one leading space if it exists
+					if len(data) > 0 && data[0] == ' ' {
+						data = data[1:]
+					}
+					event.Data = data
+				}
+			}
+
+			// Only send non-empty events
+			if len(event.Event) > 0 || len(event.Data) > 0 {
+				events <- event
+			}
+		}
+	}()
 
 	// Debug: Log that we started streaming
 	log.Printf("Starting to handle Replicate stream")
 
-	var currentEvent string
-	var currentData string
-	var streamDone bool = false
+	// Use a simple counter for the message chunks
+	chunkIndex := 0
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		log.Printf("Received line from stream: %s", line)
+	// Process events as they come in
+	for event := range events {
+		log.Printf("Received event: %s, data: %s", string(event.Event), string(event.Data))
 
-		// Skip empty lines
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-
-		// Parse the SSE event
-		if strings.HasPrefix(line, "event:") {
-			currentEvent = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-			log.Printf("Found event type: %s", currentEvent)
-		} else if strings.HasPrefix(line, "data:") {
-			currentData = strings.TrimPrefix(line, "data:")
-			// Trim only one leading space if it exists
-			if len(currentData) > 0 && currentData[0] == ' ' {
-				currentData = currentData[1:]
-			}
-			log.Printf("Found data: %s", currentData)
-
-			// Process the event and data
-			if currentEvent != "" && currentData != "" {
-				if currentEvent == "done" {
-					processEvent(w, flusher, currentEvent, currentData, &chunkIndex)
-					streamDone = true
-					break // Exit the loop after processing "done" event
-				} else {
-					processEvent(w, flusher, currentEvent, currentData, &chunkIndex)
+		// Handle different event types
+		switch string(event.Event) {
+		case "output":
+			data := string(event.Data)
+			// Skip " pending.*" or similar pending messages
+			if !strings.Contains(data, "pending") {
+				// Format as OpenAI compatible streaming format
+				chunk := map[string]interface{}{
+					"id":      fmt.Sprintf("chatcmpl-%d", time.Now().Unix()),
+					"object":  "chat.completion.chunk",
+					"created": time.Now().Unix(),
+					"model":   "claude-3.7-sonnet",
+					"choices": []map[string]interface{}{
+						{
+							"index": 0,
+							"delta": map[string]interface{}{
+								"content": data,
+							},
+							"finish_reason": nil,
+						},
+					},
 				}
 
-				// Reset for next event
-				currentEvent = ""
-				currentData = ""
+				jsonChunk, _ := json.Marshal(chunk)
+				log.Printf("Sending chunk to client: %s", jsonChunk)
+				fmt.Fprintf(w, "data: %s\n\n", jsonChunk)
+				flusher.Flush()
+				chunkIndex++
+			} else {
+				log.Printf("Skipping pending message: %s", data)
 			}
-		} else {
-			log.Printf("Unrecognized line format: %s", line)
-		}
-	}
 
-	if !streamDone && scanner.Err() != nil {
-		log.Printf("Error reading stream: %v", scanner.Err())
-	} else if !streamDone {
-		log.Printf("Scanner completed without receiving 'done' event")
-	}
-
-	log.Printf("Exiting handleReplicateStream function")
-}
-
-// Helper function to process SSE events
-func processEvent(w http.ResponseWriter, flusher http.Flusher, eventType string, data string, chunkIndex *int) {
-	if eventType == "output" {
-		// Skip " pending.*" or similar pending messages
-		if !strings.Contains(data, "pending") {
-			// Format as OpenAI compatible streaming format
+		case "done":
+			// Send final chunk with finish_reason
 			chunk := map[string]interface{}{
 				"id":      fmt.Sprintf("chatcmpl-%d", time.Now().Unix()),
 				"object":  "chat.completion.chunk",
@@ -400,48 +430,27 @@ func processEvent(w http.ResponseWriter, flusher http.Flusher, eventType string,
 				"model":   "claude-3.7-sonnet",
 				"choices": []map[string]interface{}{
 					{
-						"index": 0,
-						"delta": map[string]interface{}{
-							"content": data,
-						},
-						"finish_reason": nil,
+						"index":         0,
+						"delta":         map[string]interface{}{},
+						"finish_reason": "stop",
 					},
 				},
 			}
 
 			jsonChunk, _ := json.Marshal(chunk)
-			log.Printf("Sending chunk to client: %s", jsonChunk)
+			log.Printf("Sending final chunk to client: %s", jsonChunk)
 			fmt.Fprintf(w, "data: %s\n\n", jsonChunk)
+			fmt.Fprintf(w, "data: [DONE]\n\n")
 			flusher.Flush()
-			*chunkIndex++
-		} else {
-			log.Printf("Skipping pending message: %s", data)
-		}
-	} else if eventType == "done" {
-		// Send final chunk with finish_reason
-		chunk := map[string]interface{}{
-			"id":      fmt.Sprintf("chatcmpl-%d", time.Now().Unix()),
-			"object":  "chat.completion.chunk",
-			"created": time.Now().Unix(),
-			"model":   "claude-3.7-sonnet",
-			"choices": []map[string]interface{}{
-				{
-					"index":         0,
-					"delta":         map[string]interface{}{},
-					"finish_reason": "stop",
-				},
-			},
-		}
+			log.Printf("Stream completed")
+			return
 
-		jsonChunk, _ := json.Marshal(chunk)
-		log.Printf("Sending final chunk to client: %s", jsonChunk)
-		fmt.Fprintf(w, "data: %s\n\n", jsonChunk)
-		fmt.Fprintf(w, "data: [DONE]\n\n")
-		flusher.Flush()
-		log.Printf("Stream completed")
-	} else {
-		log.Printf("Unhandled event type: %s", eventType)
+		default:
+			log.Printf("Unhandled event type: %s", string(event.Event))
+		}
 	}
+
+	log.Printf("Exiting handleReplicateStream function")
 }
 
 func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token string) {
