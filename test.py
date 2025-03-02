@@ -10,21 +10,11 @@ from openai import OpenAI
 from rich.console import Console
 from rich.markdown import Markdown
 
-# Initialize rich console for nice formatting
 console = Console()
-
-# Configure OpenAI client to use the local proxy
-# The proxy.go default port is 9876
-client = OpenAI(
-    # api_key="your-replicate-api-key-here",  # Your Replicate API key
-    base_url="http://localhost:9876/v1",  # Point to the local proxy
-)
+client = OpenAI(base_url="http://localhost:9876/v1")
 
 
 def stream_chat_completion():
-    """
-    Demonstrate streaming chat completion through the proxy
-    """
     console.print("[bold green]Starting streaming chat completion demo[/bold green]")
     console.print(
         "[bold yellow]This will connect to the local proxy at localhost:9876[/bold yellow]"
@@ -60,9 +50,6 @@ def stream_chat_completion():
 
 
 def non_streaming_chat_completion():
-    """
-    Demonstrate non-streaming chat completion through the proxy for comparison
-    """
     console.print(
         "\n[bold green]Starting non-streaming chat completion demo[/bold green]"
     )
@@ -86,23 +73,11 @@ def non_streaming_chat_completion():
 
 
 if __name__ == "__main__":
-    # First check if the API key is set
-    if client.api_key == "your-replicate-api-key-here":
-        console.print(
-            "[bold red]Please replace 'your-replicate-api-key-here' with your actual Replicate API key[/bold red]"
-        )
-        console.print("You can set it in the script or use:")
-        console.print("[bold]export OPENAI_API_KEY=your-replicate-api-key[/bold]")
-        sys.exit(1)
-
     # Check if proxy is running
     console.print("[bold]Checking if proxy is running on localhost:9876...[/bold]")
 
     try:
-        # Run the streaming demo
         stream_chat_completion()
-
-        # Run the non-streaming demo
         non_streaming_chat_completion()
 
     except Exception as e:
