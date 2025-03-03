@@ -150,6 +150,25 @@ type ModelsResponse struct {
 	Data []ModelData `json:"data"`
 }
 
+// CORSMiddleware adds CORS headers to allow cross-origin requests
+func CORSMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Set CORS headers
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Content-Length, X-Requested-With")
+
+		// Handle preflight requests
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// Call the next handler
+		next(w, r)
+	}
+}
+
 func main() {
 	flag.Parse()
 	proxyAddr := fmt.Sprintf(":%d", *port)
@@ -163,8 +182,9 @@ func main() {
 		FullTimestamp:   true,
 	})
 
-	http.HandleFunc("/v1/chat/completions", proxyHandler)
-	http.HandleFunc("/v1/models", modelsHandler)
+	// Register routes with CORS middleware
+	http.HandleFunc("/v1/chat/completions", CORSMiddleware(proxyHandler))
+	http.HandleFunc("/v1/models", CORSMiddleware(modelsHandler))
 
 	// Server startup logs are always shown (Info level)
 	log.WithFields(logrus.Fields{
@@ -172,6 +192,7 @@ func main() {
 		"address": fmt.Sprintf("http://localhost%s", proxyAddr),
 	}).Info("🚀 Replicate Proxy Server started")
 	log.Info("📋 Endpoints available: /v1/chat/completions, /v1/models")
+	log.Info("🌐 CORS enabled: All origins allowed")
 
 	log.Fatal(http.ListenAndServe(proxyAddr, nil))
 }
