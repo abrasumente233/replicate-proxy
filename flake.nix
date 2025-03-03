@@ -17,8 +17,7 @@
             pname = "replicate-proxy";
             version = "0.1.0";
             src = ./.;
-            # vendorSha256 = null; # Set to null for zero dependencies, or the correct hash if you have dependencies
-            vendorHash = null;
+            vendorHash = "sha256-rUUreCsLDOZga2fwbjHAks7el0NRLszXYux3YoaUx8s=";
           };
 
           devShells.default = pkgs.mkShell {
