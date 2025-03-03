@@ -14,9 +14,26 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const (
-	replicateAPIURL = "https://api.replicate.com/v1/models/anthropic/claude-3.7-sonnet/predictions"
-)
+// ReplicateModel contains the information needed for model routing
+type ReplicateModel struct {
+	ReplicateAPIURL string
+	ModelID         string
+}
+
+// ModelMap maps OpenAI model IDs to Replicate model information
+var ModelMap = map[string]ReplicateModel{
+	"claude-3-7-sonnet": {
+		ReplicateAPIURL: "https://api.replicate.com/v1/models/anthropic/claude-3.7-sonnet/predictions",
+		ModelID:         "claude-3-7-sonnet",
+	},
+	"claude-3.5-sonnet": {
+		ReplicateAPIURL: "https://api.replicate.com/v1/models/anthropic/claude-3.5-sonnet/predictions",
+		ModelID:         "claude-3.5-sonnet",
+	},
+}
+
+// Default model to use if none specified
+const DefaultModel = "claude-3-7-sonnet"
 
 var (
 	port     = flag.Int("port", 9876, "Port to run the proxy server on")
@@ -188,6 +205,9 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Determine which model to use and get model information
+	modelInfo := getModelInfo(openAIReq.Model)
+
 	// Log request details (Info level)
 	reqLogger.WithFields(logrus.Fields{
 		"model":      openAIReq.Model,
@@ -208,8 +228,8 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create a new request to the Replicate API
-	reqLogger.Debug("🔄 Forwarding request to Replicate API")
-	proxyReq, err := http.NewRequest("POST", replicateAPIURL, bytes.NewReader(replicateReqBody))
+	reqLogger.WithField("url", modelInfo.ReplicateAPIURL).Debug("🔄 Forwarding request to Replicate API")
+	proxyReq, err := http.NewRequest("POST", modelInfo.ReplicateAPIURL, bytes.NewReader(replicateReqBody))
 	if err != nil {
 		reqLogger.WithError(err).Error("❌ Error creating proxy request")
 		http.Error(w, "Error creating proxy request: "+err.Error(), http.StatusInternalServerError)
@@ -288,14 +308,28 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Stream the response from Replicate
 		reqLogger.Debug("🚿 Starting to stream response from Replicate")
-		handleReplicateStream(w, streamURL, token, reqLogger)
+		handleReplicateStream(w, streamURL, token, reqLogger, modelInfo.ModelID)
 	} else {
 		// For non-streaming, we need to poll until the prediction is complete
 		reqLogger.Debug("🔄 Starting to poll for prediction results")
-		pollAndReturnPrediction(w, predictionID, token, reqLogger)
+		pollAndReturnPrediction(w, predictionID, token, reqLogger, modelInfo.ModelID)
 	}
 
 	reqLogger.WithField("duration", time.Since(startTime).String()).Info("✅ Completed request")
+}
+
+// getModelInfo returns the model information for the specified model ID,
+// or the default model if the specified model is not found
+func getModelInfo(modelID string) ReplicateModel {
+	if modelID == "" {
+		return ModelMap[DefaultModel]
+	}
+
+	if modelInfo, ok := ModelMap[modelID]; ok {
+		return modelInfo
+	}
+
+	return ModelMap[DefaultModel]
 }
 
 func convertToReplicateRequest(req OpenAIRequest) ReplicateRequest {
@@ -391,7 +425,7 @@ func getMessageContent(content interface{}) string {
 	}
 }
 
-func handleReplicateStream(w http.ResponseWriter, streamURL string, token string, logger *logrus.Entry) {
+func handleReplicateStream(w http.ResponseWriter, streamURL string, token string, logger *logrus.Entry, modelID string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		logger.Error("❌ Streaming unsupported")
@@ -443,7 +477,7 @@ func handleReplicateStream(w http.ResponseWriter, streamURL string, token string
 					"id":      fmt.Sprintf("chatcmpl-%d", time.Now().Unix()),
 					"object":  "chat.completion.chunk",
 					"created": time.Now().Unix(),
-					"model":   "claude-3.7-sonnet",
+					"model":   modelID,
 					"choices": []map[string]interface{}{
 						{
 							"index": 0,
@@ -468,7 +502,7 @@ func handleReplicateStream(w http.ResponseWriter, streamURL string, token string
 				"id":      fmt.Sprintf("chatcmpl-%d", time.Now().Unix()),
 				"object":  "chat.completion.chunk",
 				"created": time.Now().Unix(),
-				"model":   "claude-3.7-sonnet",
+				"model":   modelID,
 				"choices": []map[string]interface{}{
 					{
 						"index":         0,
@@ -491,7 +525,7 @@ func handleReplicateStream(w http.ResponseWriter, streamURL string, token string
 	}
 }
 
-func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token string, logger *logrus.Entry) {
+func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token string, logger *logrus.Entry, modelID string) {
 	// For non-streaming responses, we'd need to poll the prediction until it's complete
 	client := &http.Client{}
 
@@ -603,7 +637,7 @@ func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token s
 				"id":      fmt.Sprintf("chatcmpl-%d", time.Now().Unix()),
 				"object":  "chat.completion",
 				"created": time.Now().Unix(),
-				"model":   "claude-3.7-sonnet",
+				"model":   modelID,
 				"choices": []map[string]interface{}{
 					{
 						"index": 0,
@@ -654,7 +688,7 @@ func modelsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Hardcoded model information for Claude 3.7 Sonnet
+	// Model information
 	response := ModelsResponse{
 		Data: []ModelData{
 			{
@@ -672,6 +706,23 @@ func modelsHandler(w http.ResponseWriter, r *http.Request) {
 					Modality:     "text+image->text",
 					Tokenizer:    "Claude",
 					InstructType: nil,
+				},
+			},
+			{
+				ID:            "claude-3.5-sonnet",
+				Name:          "Claude 3.5 Sonnet",
+				Description:   "New Claude 3.5 Sonnet delivers better-than-Opus capabilities, faster-than-Sonnet speeds, at the same Sonnet prices. Sonnet is particularly good at:\n\n- Coding: Scores ~49% on SWE-Bench Verified, higher than the last best score, and without any fancy prompt scaffolding\n- Data science: Augments human data science expertise; navigates unstructured data while using multiple tools for insights\n- Visual processing: excelling at interpreting charts, graphs, and images, accurately transcribing text to derive insights beyond just the text alone\n- Agentic tasks: exceptional tool use, making it great at agentic tasks (i.e. complex, multi-step problem solving tasks that require engaging with other systems)\n\n#multimodal",
+				ContextLength: 200000,
+				Architecture: ModelArchitecture{
+					Modality:     "text+image->text",
+					Tokenizer:    "Claude",
+					InstructType: nil,
+				},
+				Pricing: ModelPricing{
+					Prompt:     "0.000003",
+					Completion: "0.000015",
+					Image:      "0.0048",
+					Request:    "0",
 				},
 			},
 		},
