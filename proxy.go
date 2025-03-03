@@ -14,26 +14,52 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// ReplicateModel contains the information needed for model routing
+// ReplicateModel contains information about a Replicate model
 type ReplicateModel struct {
-	ReplicateAPIURL string
-	ModelID         string
+	ModelData ModelData
 }
 
 // ModelMap maps OpenAI model IDs to Replicate model information
 var ModelMap = map[string]ReplicateModel{
-	"claude-3-7-sonnet": {
-		ReplicateAPIURL: "https://api.replicate.com/v1/models/anthropic/claude-3.7-sonnet/predictions",
-		ModelID:         "claude-3-7-sonnet",
+	"claude-3.7-sonnet": {
+		ModelData: ModelData{
+			ID:          "claude-3.7-sonnet",
+			Name:        "Claude 3.7 Sonnet",
+			Description: "Claude 3.7 Sonnet is an advanced large language model with improved reasoning, coding, and problem-solving capabilities. It introduces a hybrid reasoning approach, allowing users to choose between rapid responses and extended, step-by-step processing for complex tasks. The model demonstrates notable improvements in coding, particularly in front-end development and full-stack updates, and excels in agentic workflows, where it can autonomously navigate multi-step processes. \n\nClaude 3.7 Sonnet maintains performance parity with its predecessor in standard mode while offering an extended reasoning mode for enhanced accuracy in math, coding, and instruction-following tasks.\n\nRead more at the [blog post here](https://www.anthropic.com/news/claude-3-7-sonnet)",
+			Pricing: ModelPricing{
+				Prompt:     "0.000003",
+				Completion: "0.000015",
+				Image:      "0.0048",
+				Request:    "0",
+			},
+			ContextLength: 200000,
+			Architecture: ModelArchitecture{
+				Modality:     "text+image->text",
+				Tokenizer:    "Claude",
+				InstructType: nil,
+			},
+		},
 	},
 	"claude-3.5-sonnet": {
-		ReplicateAPIURL: "https://api.replicate.com/v1/models/anthropic/claude-3.5-sonnet/predictions",
-		ModelID:         "claude-3.5-sonnet",
+		ModelData: ModelData{
+			ID:            "claude-3.5-sonnet",
+			Name:          "Claude 3.5 Sonnet",
+			Description:   "New Claude 3.5 Sonnet delivers better-than-Opus capabilities, faster-than-Sonnet speeds, at the same Sonnet prices. Sonnet is particularly good at:\n\n- Coding: Scores ~49% on SWE-Bench Verified, higher than the last best score, and without any fancy prompt scaffolding\n- Data science: Augments human data science expertise; navigates unstructured data while using multiple tools for insights\n- Visual processing: excelling at interpreting charts, graphs, and images, accurately transcribing text to derive insights beyond just the text alone\n- Agentic tasks: exceptional tool use, making it great at agentic tasks (i.e. complex, multi-step problem solving tasks that require engaging with other systems)\n\n#multimodal",
+			ContextLength: 200000,
+			Architecture: ModelArchitecture{
+				Modality:     "text+image->text",
+				Tokenizer:    "Claude",
+				InstructType: nil,
+			},
+			Pricing: ModelPricing{
+				Prompt:     "0.000003",
+				Completion: "0.000015",
+				Image:      "0.0048",
+				Request:    "0",
+			},
+		},
 	},
 }
-
-// Default model to use if none specified
-const DefaultModel = "claude-3-7-sonnet"
 
 var (
 	port     = flag.Int("port", 9876, "Port to run the proxy server on")
@@ -206,7 +232,12 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Determine which model to use and get model information
-	modelInfo := getModelInfo(openAIReq.Model)
+	modelInfo, err := getModelInfo(openAIReq.Model)
+	if err != nil {
+		reqLogger.WithError(err).Error("❌ Error getting model information")
+		http.Error(w, "Error getting model information: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	// Log request details (Info level)
 	reqLogger.WithFields(logrus.Fields{
@@ -228,8 +259,9 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create a new request to the Replicate API
-	reqLogger.WithField("url", modelInfo.ReplicateAPIURL).Debug("🔄 Forwarding request to Replicate API")
-	proxyReq, err := http.NewRequest("POST", modelInfo.ReplicateAPIURL, bytes.NewReader(replicateReqBody))
+	replicateAPIURL := fmt.Sprintf("https://api.replicate.com/v1/models/anthropic/%s/predictions", modelInfo.ModelData.ID)
+	reqLogger.WithField("url", replicateAPIURL).Debug("🔄 Forwarding request to Replicate API")
+	proxyReq, err := http.NewRequest("POST", replicateAPIURL, bytes.NewReader(replicateReqBody))
 	if err != nil {
 		reqLogger.WithError(err).Error("❌ Error creating proxy request")
 		http.Error(w, "Error creating proxy request: "+err.Error(), http.StatusInternalServerError)
@@ -308,28 +340,28 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Stream the response from Replicate
 		reqLogger.Debug("🚿 Starting to stream response from Replicate")
-		handleReplicateStream(w, streamURL, token, reqLogger, modelInfo.ModelID)
+		handleReplicateStream(w, streamURL, token, reqLogger, modelInfo.ModelData.ID)
 	} else {
 		// For non-streaming, we need to poll until the prediction is complete
 		reqLogger.Debug("🔄 Starting to poll for prediction results")
-		pollAndReturnPrediction(w, predictionID, token, reqLogger, modelInfo.ModelID)
+		pollAndReturnPrediction(w, predictionID, token, reqLogger, modelInfo.ModelData.ID)
 	}
 
 	reqLogger.WithField("duration", time.Since(startTime).String()).Info("✅ Completed request")
 }
 
 // getModelInfo returns the model information for the specified model ID,
-// or the default model if the specified model is not found
-func getModelInfo(modelID string) ReplicateModel {
+// or returns an error if the specified model is not found
+func getModelInfo(modelID string) (ReplicateModel, error) {
 	if modelID == "" {
-		return ModelMap[DefaultModel]
+		return ReplicateModel{}, fmt.Errorf("no model specified")
 	}
 
 	if modelInfo, ok := ModelMap[modelID]; ok {
-		return modelInfo
+		return modelInfo, nil
 	}
 
-	return ModelMap[DefaultModel]
+	return ReplicateModel{}, fmt.Errorf("model %s not found", modelID)
 }
 
 func convertToReplicateRequest(req OpenAIRequest) ReplicateRequest {
@@ -688,44 +720,15 @@ func modelsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Extract model data from ModelMap
+	modelData := make([]ModelData, 0, len(ModelMap))
+	for _, model := range ModelMap {
+		modelData = append(modelData, model.ModelData)
+	}
+
 	// Model information
 	response := ModelsResponse{
-		Data: []ModelData{
-			{
-				ID:          "claude-3-7-sonnet",
-				Name:        "Claude 3.7 Sonnet",
-				Description: "Claude 3.7 Sonnet is an advanced large language model with improved reasoning, coding, and problem-solving capabilities. It introduces a hybrid reasoning approach, allowing users to choose between rapid responses and extended, step-by-step processing for complex tasks. The model demonstrates notable improvements in coding, particularly in front-end development and full-stack updates, and excels in agentic workflows, where it can autonomously navigate multi-step processes. \n\nClaude 3.7 Sonnet maintains performance parity with its predecessor in standard mode while offering an extended reasoning mode for enhanced accuracy in math, coding, and instruction-following tasks.\n\nRead more at the [blog post here](https://www.anthropic.com/news/claude-3-7-sonnet)",
-				Pricing: ModelPricing{
-					Prompt:     "0.000003",
-					Completion: "0.000015",
-					Image:      "0.0048",
-					Request:    "0",
-				},
-				ContextLength: 200000,
-				Architecture: ModelArchitecture{
-					Modality:     "text+image->text",
-					Tokenizer:    "Claude",
-					InstructType: nil,
-				},
-			},
-			{
-				ID:            "claude-3.5-sonnet",
-				Name:          "Claude 3.5 Sonnet",
-				Description:   "New Claude 3.5 Sonnet delivers better-than-Opus capabilities, faster-than-Sonnet speeds, at the same Sonnet prices. Sonnet is particularly good at:\n\n- Coding: Scores ~49% on SWE-Bench Verified, higher than the last best score, and without any fancy prompt scaffolding\n- Data science: Augments human data science expertise; navigates unstructured data while using multiple tools for insights\n- Visual processing: excelling at interpreting charts, graphs, and images, accurately transcribing text to derive insights beyond just the text alone\n- Agentic tasks: exceptional tool use, making it great at agentic tasks (i.e. complex, multi-step problem solving tasks that require engaging with other systems)\n\n#multimodal",
-				ContextLength: 200000,
-				Architecture: ModelArchitecture{
-					Modality:     "text+image->text",
-					Tokenizer:    "Claude",
-					InstructType: nil,
-				},
-				Pricing: ModelPricing{
-					Prompt:     "0.000003",
-					Completion: "0.000015",
-					Image:      "0.0048",
-					Request:    "0",
-				},
-			},
-		},
+		Data: modelData,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
