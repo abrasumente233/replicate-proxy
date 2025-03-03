@@ -6,12 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/r3labs/sse/v2"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -19,7 +19,9 @@ const (
 )
 
 var (
-	port = flag.Int("port", 9876, "Port to run the proxy server on")
+	port     = flag.Int("port", 9876, "Port to run the proxy server on")
+	logLevel = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+	log      = logrus.New()
 )
 
 // OpenAI-compatible request structure
@@ -78,14 +80,64 @@ type ReplicatePredictionResponse struct {
 func main() {
 	flag.Parse()
 	proxyAddr := fmt.Sprintf(":%d", *port)
+
+	// Set up logrus
+	setLogLevel(*logLevel)
+
+	// Configure logrus output format
+	log.SetFormatter(&logrus.TextFormatter{
+		TimestampFormat: "2006/01/02 15:04:05",
+		FullTimestamp:   true,
+	})
+
 	http.HandleFunc("/v1/chat/completions", proxyHandler)
+
+	// Server startup logs are always shown (Info level)
+	log.WithFields(logrus.Fields{
+		"port":    *port,
+		"address": fmt.Sprintf("http://localhost%s", proxyAddr),
+	}).Info("🚀 Replicate Proxy Server started")
+	log.Info("📋 Endpoints available: /v1/chat/completions")
+
 	log.Fatal(http.ListenAndServe(proxyAddr, nil))
 }
 
+// Set log level based on flag
+func setLogLevel(level string) {
+	switch strings.ToLower(level) {
+	case "debug":
+		log.SetLevel(logrus.DebugLevel)
+	case "info":
+		log.SetLevel(logrus.InfoLevel)
+	case "warn", "warning":
+		log.SetLevel(logrus.WarnLevel)
+	case "error":
+		log.SetLevel(logrus.ErrorLevel)
+	default:
+		log.SetLevel(logrus.InfoLevel)
+	}
+	log.Infof("Log level set to: %s", log.GetLevel())
+}
+
 func proxyHandler(w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
+	requestID := fmt.Sprintf("req_%d", time.Now().UnixNano())
+
+	// Create logger fields for this request
+	reqLogger := log.WithFields(logrus.Fields{
+		"request_id": requestID,
+		"client_ip":  r.RemoteAddr,
+		"method":     r.Method,
+		"path":       r.URL.Path,
+	})
+
+	// Always log basic request info (Info level)
+	reqLogger.Info("📥 Request received")
+
 	// Check for Bearer token
 	authHeader := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authHeader, "Bearer ") {
+		reqLogger.Error("❌ Unauthorized: Bearer token required")
 		http.Error(w, "Unauthorized: Bearer token required", http.StatusUnauthorized)
 		return
 	}
@@ -95,6 +147,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	// Read the request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		reqLogger.WithError(err).Error("❌ Error reading request body")
 		http.Error(w, "Error reading request body", http.StatusInternalServerError)
 		return
 	}
@@ -102,21 +155,35 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	// Parse the OpenAI-compatible request
 	var openAIReq OpenAIRequest
 	if err := json.Unmarshal(body, &openAIReq); err != nil {
+		reqLogger.WithError(err).Error("❌ Error parsing request body")
 		http.Error(w, "Error parsing request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// Log request details (Info level)
+	reqLogger.WithFields(logrus.Fields{
+		"model":      openAIReq.Model,
+		"stream":     openAIReq.Stream,
+		"max_tokens": openAIReq.MaxTokens,
+	}).Info("📄 Request details")
+
+	// More detailed logs (Debug level)
+	reqLogger.WithField("messages_count", len(openAIReq.Messages)).Debug("📨 Messages count")
 
 	// Convert to Replicate request format
 	replicateReq := convertToReplicateRequest(openAIReq)
 	replicateReqBody, err := json.Marshal(replicateReq)
 	if err != nil {
+		reqLogger.WithError(err).Error("❌ Error creating Replicate request")
 		http.Error(w, "Error creating Replicate request: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	// Create a new request to the Replicate API
+	reqLogger.Debug("🔄 Forwarding request to Replicate API")
 	proxyReq, err := http.NewRequest("POST", replicateAPIURL, bytes.NewReader(replicateReqBody))
 	if err != nil {
+		reqLogger.WithError(err).Error("❌ Error creating proxy request")
 		http.Error(w, "Error creating proxy request: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -129,6 +196,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{}
 	resp, err := client.Do(proxyReq)
 	if err != nil {
+		reqLogger.WithError(err).Error("❌ Error sending request to Replicate API")
 		http.Error(w, "Error sending request to Replicate API: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -136,6 +204,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 
 	// If response is not successful, forward the error
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		reqLogger.WithField("status_code", resp.StatusCode).Warn("⚠️ Replicate API error")
 		w.WriteHeader(resp.StatusCode)
 		io.Copy(w, resp.Body)
 		return
@@ -144,6 +213,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	// Read the full response body first
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		reqLogger.WithError(err).Error("❌ Error reading Replicate response")
 		http.Error(w, "Error reading Replicate response: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -151,6 +221,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	// Parse the raw response to get both the stream URL and prediction ID
 	var rawResponse map[string]interface{}
 	if err := json.Unmarshal(respBody, &rawResponse); err != nil {
+		reqLogger.WithError(err).Error("❌ Error parsing Replicate response")
 		http.Error(w, "Error parsing Replicate response: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -158,12 +229,16 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	// Extract prediction ID
 	predictionID, ok := rawResponse["id"].(string)
 	if !ok {
+		reqLogger.Error("❌ No prediction ID found in response")
 		http.Error(w, "No prediction ID found in response", http.StatusInternalServerError)
 		return
 	}
 
+	reqLogger.WithField("prediction_id", predictionID).Debug("📝 Received prediction ID")
+
 	// If streaming is requested
 	if openAIReq.Stream {
+		reqLogger.Debug("📺 Processing stream request")
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
@@ -171,22 +246,28 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		// Get the stream URL
 		urls, ok := rawResponse["urls"].(map[string]interface{})
 		if !ok {
+			reqLogger.Error("❌ URLs field not found in response")
 			http.Error(w, "URLs field not found in response", http.StatusInternalServerError)
 			return
 		}
 
 		streamURL, ok := urls["stream"].(string)
 		if !ok || streamURL == "" {
+			reqLogger.Error("❌ No stream URL provided in Replicate response")
 			http.Error(w, "No stream URL provided in Replicate response", http.StatusInternalServerError)
 			return
 		}
 
 		// Stream the response from Replicate
-		handleReplicateStream(w, streamURL, token)
+		reqLogger.Debug("🚿 Starting to stream response from Replicate")
+		handleReplicateStream(w, streamURL, token, reqLogger)
 	} else {
 		// For non-streaming, we need to poll until the prediction is complete
-		pollAndReturnPrediction(w, predictionID, token)
+		reqLogger.Debug("🔄 Starting to poll for prediction results")
+		pollAndReturnPrediction(w, predictionID, token, reqLogger)
 	}
+
+	reqLogger.WithField("duration", time.Since(startTime).String()).Info("✅ Request completed")
 }
 
 func convertToReplicateRequest(req OpenAIRequest) ReplicateRequest {
@@ -282,9 +363,10 @@ func getMessageContent(content interface{}) string {
 	}
 }
 
-func handleReplicateStream(w http.ResponseWriter, streamURL string, token string) {
+func handleReplicateStream(w http.ResponseWriter, streamURL string, token string, logger *logrus.Entry) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		logger.Error("❌ Streaming unsupported")
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
 		return
 	}
@@ -304,12 +386,13 @@ func handleReplicateStream(w http.ResponseWriter, streamURL string, token string
 
 	// Use a simple counter for the message chunks
 	chunkIndex := 0
+	totalChunks := 0
 
 	// Start subscription in a goroutine
 	go func() {
 		err := client.SubscribeChan("", events)
 		if err != nil {
-			// Error handling is preserved but without logging
+			logger.WithError(err).Error("❌ Error subscribing to SSE events")
 		}
 	}()
 
@@ -321,6 +404,12 @@ func handleReplicateStream(w http.ResponseWriter, streamURL string, token string
 			data := string(event.Data)
 			// Skip " pending.*" or similar pending messages
 			if !strings.Contains(data, "pending") {
+				totalChunks++
+				// Every 10 chunks, log progress (debug level)
+				if totalChunks%10 == 0 {
+					logger.WithField("chunks", totalChunks).Debug("🔄 Streaming progress")
+				}
+
 				// Format as OpenAI compatible streaming format
 				chunk := map[string]interface{}{
 					"id":      fmt.Sprintf("chatcmpl-%d", time.Now().Unix()),
@@ -345,6 +434,7 @@ func handleReplicateStream(w http.ResponseWriter, streamURL string, token string
 			}
 
 		case "done":
+			logger.WithField("total_chunks", totalChunks).Debug("✅ Stream completed")
 			// Send final chunk with finish_reason
 			chunk := map[string]interface{}{
 				"id":      fmt.Sprintf("chatcmpl-%d", time.Now().Unix()),
@@ -367,12 +457,13 @@ func handleReplicateStream(w http.ResponseWriter, streamURL string, token string
 			return
 
 		default:
-			// No action needed for unhandled event types (removed logging)
+			// Log unhandled event types (debug level)
+			logger.WithField("event_type", string(event.Event)).Debug("ℹ️ Unhandled event type")
 		}
 	}
 }
 
-func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token string) {
+func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token string, logger *logrus.Entry) {
 	// For non-streaming responses, we'd need to poll the prediction until it's complete
 	client := &http.Client{}
 
@@ -381,6 +472,7 @@ func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token s
 
 	pollReq, err := http.NewRequest("GET", initialPollURL, nil)
 	if err != nil {
+		logger.WithError(err).Error("❌ Error creating poll request")
 		http.Error(w, "Error creating poll request: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -388,6 +480,7 @@ func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token s
 
 	pollResp, err := client.Do(pollReq)
 	if err != nil {
+		logger.WithError(err).Error("❌ Error polling prediction")
 		http.Error(w, "Error polling prediction: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -397,6 +490,7 @@ func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token s
 
 	var initialPollResult map[string]interface{}
 	if err := json.Unmarshal(respBody, &initialPollResult); err != nil {
+		logger.WithError(err).Error("❌ Error parsing poll response")
 		http.Error(w, "Error parsing poll response: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -404,6 +498,7 @@ func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token s
 	// Extract the "get" URL from the response
 	urls, ok := initialPollResult["urls"].(map[string]interface{})
 	if !ok {
+		logger.Error("❌ Error extracting URLs from prediction response")
 		http.Error(w, "Error extracting URLs from prediction response", http.StatusInternalServerError)
 		return
 	}
@@ -411,16 +506,19 @@ func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token s
 	getURL, ok := urls["get"].(string)
 	if !ok || getURL == "" {
 		// Fall back to constructed URL if "get" URL is not available
+		logger.Debug("⚠️ No 'get' URL found, falling back to constructed URL")
 		getURL = initialPollURL
 	}
 
 	pollCount := 0
 	for {
 		pollCount++
+		logger.WithField("attempt", pollCount).Debug("🔄 Polling prediction")
 		time.Sleep(1 * time.Second)
 
 		pollReq, err := http.NewRequest("GET", getURL, nil)
 		if err != nil {
+			logger.WithError(err).Error("❌ Error creating poll request")
 			http.Error(w, "Error creating poll request: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -429,6 +527,7 @@ func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token s
 
 		pollResp, err := client.Do(pollReq)
 		if err != nil {
+			logger.WithError(err).Error("❌ Error polling prediction")
 			http.Error(w, "Error polling prediction: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -438,13 +537,16 @@ func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token s
 
 		var pollResult map[string]interface{}
 		if err := json.Unmarshal(respBody, &pollResult); err != nil {
+			logger.WithError(err).Error("❌ Error parsing poll response")
 			http.Error(w, "Error parsing poll response: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		status, _ := pollResult["status"].(string)
+		logger.WithField("status", status).Debug("📊 Prediction status")
 
 		if status == "succeeded" {
+			logger.Debug("✅ Prediction completed successfully")
 			// Extract the output, which could be a string or an array of strings
 			var output string
 
@@ -464,6 +566,7 @@ func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token s
 				}
 				output = builder.String()
 			default:
+				logger.Error("❌ Unexpected output format in prediction response")
 				http.Error(w, "Unexpected output format in prediction response", http.StatusInternalServerError)
 				return
 			}
@@ -492,9 +595,11 @@ func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token s
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(response)
+			logger.Debug("📤 Response sent to client")
 			return
 		} else if status == "failed" || status == "canceled" {
 			error, _ := pollResult["error"].(string)
+			logger.WithField("error", error).Error("❌ Prediction failed")
 			http.Error(w, fmt.Sprintf("Prediction failed: %s", error), http.StatusInternalServerError)
 			return
 		}
