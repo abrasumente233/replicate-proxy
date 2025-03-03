@@ -77,6 +77,36 @@ type ReplicatePredictionResponse struct {
 	Status string `json:"status"`
 }
 
+// ModelData represents a single model in the response
+type ModelData struct {
+	ID            string            `json:"id"`
+	Name          string            `json:"name"`
+	Description   string            `json:"description"`
+	Pricing       ModelPricing      `json:"pricing"`
+	ContextLength int               `json:"context_length"`
+	Architecture  ModelArchitecture `json:"architecture"`
+}
+
+// ModelPricing represents the pricing information for a model
+type ModelPricing struct {
+	Prompt     string `json:"prompt"`
+	Completion string `json:"completion"`
+	Image      string `json:"image"`
+	Request    string `json:"request"`
+}
+
+// ModelArchitecture represents the architecture information for a model
+type ModelArchitecture struct {
+	Modality     string      `json:"modality"`
+	Tokenizer    string      `json:"tokenizer"`
+	InstructType interface{} `json:"instruct_type"`
+}
+
+// ModelsResponse represents the response for the /v1/models endpoint
+type ModelsResponse struct {
+	Data []ModelData `json:"data"`
+}
+
 func main() {
 	flag.Parse()
 	proxyAddr := fmt.Sprintf(":%d", *port)
@@ -91,13 +121,14 @@ func main() {
 	})
 
 	http.HandleFunc("/v1/chat/completions", proxyHandler)
+	http.HandleFunc("/v1/models", modelsHandler)
 
 	// Server startup logs are always shown (Info level)
 	log.WithFields(logrus.Fields{
 		"port":    *port,
 		"address": fmt.Sprintf("http://localhost%s", proxyAddr),
 	}).Info("🚀 Replicate Proxy Server started")
-	log.Info("📋 Endpoints available: /v1/chat/completions")
+	log.Info("📋 Endpoints available: /v1/chat/completions, /v1/models")
 
 	log.Fatal(http.ListenAndServe(proxyAddr, nil))
 }
@@ -603,4 +634,57 @@ func pollAndReturnPrediction(w http.ResponseWriter, predictionID string, token s
 
 		// Continue polling for other statuses like "starting", "processing"
 	}
+}
+
+// modelsHandler handles the /v1/models endpoint
+func modelsHandler(w http.ResponseWriter, r *http.Request) {
+	requestID := fmt.Sprintf("req_%d", time.Now().UnixNano())
+	logger := log.WithFields(logrus.Fields{
+		"request_id": requestID,
+		"endpoint":   "/v1/models",
+		"method":     r.Method,
+	})
+
+	logger.Debug("Received request for models")
+
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		logger.Warnf("Method not allowed: %s", r.Method)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Method not allowed"})
+		return
+	}
+
+	// Hardcoded model information for Claude 3.7 Sonnet
+	response := ModelsResponse{
+		Data: []ModelData{
+			{
+				ID:          "claude-3-7-sonnet",
+				Name:        "Claude 3.7 Sonnet",
+				Description: "Claude 3.7 Sonnet is an advanced large language model with improved reasoning, coding, and problem-solving capabilities. It introduces a hybrid reasoning approach, allowing users to choose between rapid responses and extended, step-by-step processing for complex tasks. The model demonstrates notable improvements in coding, particularly in front-end development and full-stack updates, and excels in agentic workflows, where it can autonomously navigate multi-step processes. \n\nClaude 3.7 Sonnet maintains performance parity with its predecessor in standard mode while offering an extended reasoning mode for enhanced accuracy in math, coding, and instruction-following tasks.\n\nRead more at the [blog post here](https://www.anthropic.com/news/claude-3-7-sonnet)",
+				Pricing: ModelPricing{
+					Prompt:     "0.000003",
+					Completion: "0.000015",
+					Image:      "0.0048",
+					Request:    "0",
+				},
+				ContextLength: 200000,
+				Architecture: ModelArchitecture{
+					Modality:     "text+image->text",
+					Tokenizer:    "Claude",
+					InstructType: nil,
+				},
+			},
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		logger.Errorf("Error encoding response: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Internal server error"})
+		return
+	}
+
+	logger.Infof("Returned list of models")
 }
