@@ -131,9 +131,6 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		"path":       r.URL.Path,
 	})
 
-	// Always log basic request info (Info level)
-	reqLogger.Info("📥 Request received")
-
 	// Check for Bearer token
 	authHeader := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authHeader, "Bearer ") {
@@ -165,7 +162,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		"model":      openAIReq.Model,
 		"stream":     openAIReq.Stream,
 		"max_tokens": openAIReq.MaxTokens,
-	}).Info("📄 Request details")
+	}).Info("📥 Incoming request")
 
 	// More detailed logs (Debug level)
 	reqLogger.WithField("messages_count", len(openAIReq.Messages)).Debug("📨 Messages count")
@@ -267,7 +264,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 		pollAndReturnPrediction(w, predictionID, token, reqLogger)
 	}
 
-	reqLogger.WithField("duration", time.Since(startTime).String()).Info("✅ Request completed")
+	reqLogger.WithField("duration", time.Since(startTime).String()).Info("✅ Completed request")
 }
 
 func convertToReplicateRequest(req OpenAIRequest) ReplicateRequest {
