@@ -398,8 +398,9 @@ func convertToReplicateRequest(req OpenAIRequest) ReplicateRequest {
 
 func formatMessagesAsPrompt(messages []Message) string {
 	var prompt strings.Builder
+	lastMessageIsAssistant := false
 
-	for _, msg := range messages {
+	for i, msg := range messages {
 		switch msg.Role {
 		case "system":
 			content := getMessageContent(msg.Content)
@@ -414,9 +415,21 @@ func formatMessagesAsPrompt(messages []Message) string {
 		case "assistant":
 			content := getMessageContent(msg.Content)
 			if msg.Name != "" {
-				prompt.WriteString(fmt.Sprintf("Assistant %s: %s\n\n", msg.Name, content))
+				// If it's the last message, don't add newlines
+				if i == len(messages)-1 {
+					prompt.WriteString(fmt.Sprintf("Assistant %s: %s", msg.Name, content))
+					lastMessageIsAssistant = true
+				} else {
+					prompt.WriteString(fmt.Sprintf("Assistant %s: %s\n\n", msg.Name, content))
+				}
 			} else {
-				prompt.WriteString(fmt.Sprintf("Assistant: %s\n\n", content))
+				// If it's the last message, don't add newlines
+				if i == len(messages)-1 {
+					prompt.WriteString(fmt.Sprintf("Assistant: %s", content))
+					lastMessageIsAssistant = true
+				} else {
+					prompt.WriteString(fmt.Sprintf("Assistant: %s\n\n", content))
+				}
 			}
 		case "tool":
 			content := getMessageContent(msg.Content)
@@ -424,8 +437,10 @@ func formatMessagesAsPrompt(messages []Message) string {
 		}
 	}
 
-	// Add the final assistant prompt
-	prompt.WriteString("Assistant: ")
+	// Add the final assistant prompt only if the last message is not from assistant
+	if !lastMessageIsAssistant {
+		prompt.WriteString("Assistant: ")
+	}
 
 	return prompt.String()
 }
