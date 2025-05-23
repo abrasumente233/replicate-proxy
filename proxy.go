@@ -32,7 +32,7 @@ var ModelMap = map[string]ReplicateModel{
 				Image:      "0",
 				Request:    "0",
 			},
-			ContextLength: 128000,
+			ContextLength: 1047576,
 			Architecture: ModelArchitecture{
 				Modality:     "text+image->text",
 				Tokenizer:    "GPT",
