@@ -40,6 +40,25 @@ var ModelMap = map[string]ReplicateModel{
 			},
 		},
 	},
+	"openai/o1-high": {
+		ModelData: ModelData{
+			ID:          "openai/o1",
+			Name:        "o1 High",
+			Description: "OpenAI's first o-series reasoning model",
+			Pricing: ModelPricing{
+				Prompt:     "0.000015",
+				Completion: "0.00006",
+				Image:      "0.021675",
+				Request:    "0",
+			},
+			ContextLength: 200000,
+			Architecture: ModelArchitecture{
+				Modality:     "text+image->text",
+				Tokenizer:    "GPT",
+				InstructType: nil,
+			},
+		},
+	},
 	"openai/gpt-4.1": {
 		ModelData: ModelData{
 			ID:          "openai/gpt-4.1",
