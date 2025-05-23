@@ -16,14 +16,15 @@ import (
 
 // ReplicateModel contains information about a Replicate model
 type ReplicateModel struct {
-	ModelData ModelData
+	ReplicateID string    // The actual Replicate model ID for API calls
+	ModelData   ModelData // The public model information
 }
 
 // ModelMap maps OpenAI model IDs to Replicate model information
 var ModelMap = map[string]ReplicateModel{
 	"openai/o4-mini-high": {
+		ReplicateID: "openai/o4-mini",
 		ModelData: ModelData{
-			ID:          "openai/o4-mini",
 			Name:        "o4 Mini High",
 			Description: "OpenAI's fast, lightweight reasoning model",
 			Pricing: ModelPricing{
@@ -41,8 +42,8 @@ var ModelMap = map[string]ReplicateModel{
 		},
 	},
 	"openai/o1-high": {
+		ReplicateID: "openai/o1",
 		ModelData: ModelData{
-			ID:          "openai/o1",
 			Name:        "o1 High",
 			Description: "OpenAI's first o-series reasoning model",
 			Pricing: ModelPricing{
@@ -60,8 +61,8 @@ var ModelMap = map[string]ReplicateModel{
 		},
 	},
 	"openai/gpt-4.1": {
+		ReplicateID: "openai/gpt-4.1",
 		ModelData: ModelData{
-			ID:          "openai/gpt-4.1",
 			Name:        "GPT-4.1",
 			Description: "OpenAI's Flagship GPT model for complex tasks.",
 			Pricing: ModelPricing{
@@ -79,8 +80,8 @@ var ModelMap = map[string]ReplicateModel{
 		},
 	},
 	"openai/gpt-4o": {
+		ReplicateID: "openai/gpt-4o",
 		ModelData: ModelData{
-			ID:          "openai/gpt-4o",
 			Name:        "GPT-4o",
 			Description: "OpenAI's high-intelligence chat model",
 			Pricing: ModelPricing{
@@ -98,8 +99,8 @@ var ModelMap = map[string]ReplicateModel{
 		},
 	},
 	"anthropic/claude-sonnet-4": {
+		ReplicateID: "anthropic/claude-4-sonnet",
 		ModelData: ModelData{
-			ID:          "anthropic/claude-4-sonnet",
 			Name:        "Claude Sonnet 4",
 			Description: "Claude Sonnet 4 is a significant upgrade to 3.7, delivering superior coding and reasoning while responding more precisely to your instructions",
 			Pricing: ModelPricing{
@@ -117,8 +118,8 @@ var ModelMap = map[string]ReplicateModel{
 		},
 	},
 	"anthropic/claude-3.7-sonnet": {
+		ReplicateID: "anthropic/claude-3.7-sonnet",
 		ModelData: ModelData{
-			ID:          "anthropic/claude-3.7-sonnet",
 			Name:        "Claude 3.7 Sonnet",
 			Description: "Claude 3.7 Sonnet is an advanced large language model with improved reasoning, coding, and problem-solving capabilities. It introduces a hybrid reasoning approach, allowing users to choose between rapid responses and extended, step-by-step processing for complex tasks. The model demonstrates notable improvements in coding, particularly in front-end development and full-stack updates, and excels in agentic workflows, where it can autonomously navigate multi-step processes. \n\nClaude 3.7 Sonnet maintains performance parity with its predecessor in standard mode while offering an extended reasoning mode for enhanced accuracy in math, coding, and instruction-following tasks.\n\nRead more at the [blog post here](https://www.anthropic.com/news/claude-3-7-sonnet)",
 			Pricing: ModelPricing{
@@ -136,8 +137,8 @@ var ModelMap = map[string]ReplicateModel{
 		},
 	},
 	"anthropic/claude-3.5-sonnet": {
+		ReplicateID: "anthropic/claude-3.5-sonnet",
 		ModelData: ModelData{
-			ID:            "anthropic/claude-3.5-sonnet",
 			Name:          "Claude 3.5 Sonnet",
 			Description:   "New Claude 3.5 Sonnet delivers better-than-Opus capabilities, faster-than-Sonnet speeds, at the same Sonnet prices. Sonnet is particularly good at:\n\n- Coding: Scores ~49% on SWE-Bench Verified, higher than the last best score, and without any fancy prompt scaffolding\n- Data science: Augments human data science expertise; navigates unstructured data while using multiple tools for insights\n- Visual processing: excelling at interpreting charts, graphs, and images, accurately transcribing text to derive insights beyond just the text alone\n- Agentic tasks: exceptional tool use, making it great at agentic tasks (i.e. complex, multi-step problem solving tasks that require engaging with other systems)\n\n#multimodal",
 			ContextLength: 200000,
@@ -375,7 +376,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create a new request to the Replicate API
-	replicateAPIURL := fmt.Sprintf("https://api.replicate.com/v1/models/%s/predictions", modelInfo.ModelData.ID)
+	replicateAPIURL := fmt.Sprintf("https://api.replicate.com/v1/models/%s/predictions", modelInfo.ReplicateID)
 	reqLogger.WithField("url", replicateAPIURL).Debug("🔄 Forwarding request to Replicate API")
 	proxyReq, err := http.NewRequest("POST", replicateAPIURL, bytes.NewReader(replicateReqBody))
 	if err != nil {
@@ -456,11 +457,11 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Stream the response from Replicate
 		reqLogger.Debug("🚿 Starting to stream response from Replicate")
-		handleReplicateStream(w, streamURL, token, reqLogger, modelInfo.ModelData.ID)
+		handleReplicateStream(w, streamURL, token, reqLogger, openAIReq.Model)
 	} else {
 		// For non-streaming, we need to poll until the prediction is complete
 		reqLogger.Debug("🔄 Starting to poll for prediction results")
-		pollAndReturnPrediction(w, predictionID, token, reqLogger, modelInfo.ModelData.ID)
+		pollAndReturnPrediction(w, predictionID, token, reqLogger, openAIReq.Model)
 	}
 
 	reqLogger.WithField("duration", time.Since(startTime).String()).Info("✅ Completed request")
@@ -856,10 +857,12 @@ func modelsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract model data from ModelMap
+	// Extract model data from ModelMap, setting ID from map key
 	modelData := make([]ModelData, 0, len(ModelMap))
-	for _, model := range ModelMap {
-		modelData = append(modelData, model.ModelData)
+	for proxyModelName, model := range ModelMap {
+		modelInfo := model.ModelData
+		modelInfo.ID = proxyModelName // Set ID from map key - no duplication!
+		modelData = append(modelData, modelInfo)
 	}
 
 	// Model information
