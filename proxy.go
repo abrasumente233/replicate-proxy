@@ -21,6 +21,25 @@ type ReplicateModel struct {
 
 // ModelMap maps OpenAI model IDs to Replicate model information
 var ModelMap = map[string]ReplicateModel{
+	"openai/o4-mini-high": {
+		ModelData: ModelData{
+			ID:          "openai/o4-mini",
+			Name:        "o4 Mini High",
+			Description: "OpenAI's fast, lightweight reasoning model",
+			Pricing: ModelPricing{
+				Prompt:     "0.000001",
+				Completion: "0.000004",
+				Image:      "0.0008415",
+				Request:    "0",
+			},
+			ContextLength: 200000,
+			Architecture: ModelArchitecture{
+				Modality:     "text+image->text",
+				Tokenizer:    "GPT",
+				InstructType: nil,
+			},
+		},
+	},
 	"openai/gpt-4.1": {
 		ModelData: ModelData{
 			ID:          "openai/gpt-4.1",
@@ -328,7 +347,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	reqLogger.WithField("messages_count", len(openAIReq.Messages)).Debug("📨 Messages count")
 
 	// Convert to Replicate request format
-	replicateReq := convertToReplicateRequest(openAIReq)
+	replicateReq := convertToReplicateRequest(openAIReq, openAIReq.Model)
 	replicateReqBody, err := json.Marshal(replicateReq)
 	if err != nil {
 		reqLogger.WithError(err).Error("❌ Error creating Replicate request")
@@ -442,7 +461,7 @@ func getModelInfo(modelID string) (ReplicateModel, error) {
 	return ReplicateModel{}, fmt.Errorf("model %s not found", modelID)
 }
 
-func convertToReplicateRequest(req OpenAIRequest) ReplicateRequest {
+func convertToReplicateRequest(req OpenAIRequest, model string) ReplicateRequest {
 	input := make(map[string]interface{})
 
 	// Handle either messages or prompt
@@ -452,6 +471,11 @@ func convertToReplicateRequest(req OpenAIRequest) ReplicateRequest {
 		input["prompt"] = prompt
 	} else if req.Prompt != "" {
 		input["prompt"] = req.Prompt
+	}
+
+	// Add reasoning_effort parameter for o4-mini-high model
+	if model == "openai/o4-mini-high" {
+		input["reasoning_effort"] = "high"
 	}
 
 	// Add additional parameters that Claude supports
