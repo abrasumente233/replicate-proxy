@@ -21,9 +21,28 @@ type ReplicateModel struct {
 
 // ModelMap maps OpenAI model IDs to Replicate model information
 var ModelMap = map[string]ReplicateModel{
-	"claude-3.7-sonnet": {
+	"anthropic/claude-sonnet-4": {
 		ModelData: ModelData{
-			ID:          "claude-3.7-sonnet",
+			ID:          "anthropic/claude-4-sonnet",
+			Name:        "Claude Sonnet 4",
+			Description: "Claude Sonnet 4 is a significant upgrade to 3.7, delivering superior coding and reasoning while responding more precisely to your instructions",
+			Pricing: ModelPricing{
+				Prompt:     "0.000003",
+				Completion: "0.000015",
+				Image:      "0.0048",
+				Request:    "0",
+			},
+			ContextLength: 200000,
+			Architecture: ModelArchitecture{
+				Modality:     "text+image->text",
+				Tokenizer:    "Claude",
+				InstructType: nil,
+			},
+		},
+	},
+	"anthropic/claude-3.7-sonnet": {
+		ModelData: ModelData{
+			ID:          "anthropic/claude-3.7-sonnet",
 			Name:        "Claude 3.7 Sonnet",
 			Description: "Claude 3.7 Sonnet is an advanced large language model with improved reasoning, coding, and problem-solving capabilities. It introduces a hybrid reasoning approach, allowing users to choose between rapid responses and extended, step-by-step processing for complex tasks. The model demonstrates notable improvements in coding, particularly in front-end development and full-stack updates, and excels in agentic workflows, where it can autonomously navigate multi-step processes. \n\nClaude 3.7 Sonnet maintains performance parity with its predecessor in standard mode while offering an extended reasoning mode for enhanced accuracy in math, coding, and instruction-following tasks.\n\nRead more at the [blog post here](https://www.anthropic.com/news/claude-3-7-sonnet)",
 			Pricing: ModelPricing{
@@ -40,9 +59,9 @@ var ModelMap = map[string]ReplicateModel{
 			},
 		},
 	},
-	"claude-3.5-sonnet": {
+	"anthropic/claude-3.5-sonnet": {
 		ModelData: ModelData{
-			ID:            "claude-3.5-sonnet",
+			ID:            "anthropic/claude-3.5-sonnet",
 			Name:          "Claude 3.5 Sonnet",
 			Description:   "New Claude 3.5 Sonnet delivers better-than-Opus capabilities, faster-than-Sonnet speeds, at the same Sonnet prices. Sonnet is particularly good at:\n\n- Coding: Scores ~49% on SWE-Bench Verified, higher than the last best score, and without any fancy prompt scaffolding\n- Data science: Augments human data science expertise; navigates unstructured data while using multiple tools for insights\n- Visual processing: excelling at interpreting charts, graphs, and images, accurately transcribing text to derive insights beyond just the text alone\n- Agentic tasks: exceptional tool use, making it great at agentic tasks (i.e. complex, multi-step problem solving tasks that require engaging with other systems)\n\n#multimodal",
 			ContextLength: 200000,
@@ -280,7 +299,7 @@ func proxyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create a new request to the Replicate API
-	replicateAPIURL := fmt.Sprintf("https://api.replicate.com/v1/models/anthropic/%s/predictions", modelInfo.ModelData.ID)
+	replicateAPIURL := fmt.Sprintf("https://api.replicate.com/v1/models/%s/predictions", modelInfo.ModelData.ID)
 	reqLogger.WithField("url", replicateAPIURL).Debug("🔄 Forwarding request to Replicate API")
 	proxyReq, err := http.NewRequest("POST", replicateAPIURL, bytes.NewReader(replicateReqBody))
 	if err != nil {

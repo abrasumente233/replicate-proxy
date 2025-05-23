@@ -22,12 +22,16 @@ def stream_chat_completion():
 
     # Create a streaming chat completion
     stream = client.chat.completions.create(
-        model="claude-3.7-sonnet",  # This gets mapped by the proxy
+        model="anthropic/claude-3.7-sonnet",  # This gets mapped by the proxy
         messages=[
             {"role": "system", "content": "You are a helpful AI assistant."},
             {
                 "role": "user",
-                "content": "Explain quantum computing in simple terms, one paragraph at a time.",
+                "content": "Write Hello World in Rust.",
+            },
+            {
+                "role": "assistant",
+                "content": "```rust",
             },
         ],
         stream=True,  # Enable streaming
@@ -56,7 +60,7 @@ def non_streaming_chat_completion():
 
     # Create a non-streaming chat completion
     response = client.chat.completions.create(
-        model="claude-3.7-sonnet",  # This gets mapped by the proxy
+        model="anthropi/claude-3.7-sonnet",  # This gets mapped by the proxy
         messages=[
             {"role": "system", "content": "You are a helpful AI assistant."},
             {"role": "user", "content": "Write a short poem about coding."},
