@@ -21,6 +21,25 @@ type ReplicateModel struct {
 
 // ModelMap maps OpenAI model IDs to Replicate model information
 var ModelMap = map[string]ReplicateModel{
+	"openai/gpt-4.1": {
+		ModelData: ModelData{
+			ID:          "openai/gpt-4.1",
+			Name:        "GPT-4.1",
+			Description: "OpenAI's Flagship GPT model for complex tasks.",
+			Pricing: ModelPricing{
+				Prompt:     "0.000002",
+				Completion: "0.000008",
+				Image:      "0",
+				Request:    "0",
+			},
+			ContextLength: 128000,
+			Architecture: ModelArchitecture{
+				Modality:     "text+image->text",
+				Tokenizer:    "GPT",
+				InstructType: nil,
+			},
+		},
+	},
 	"openai/gpt-4o": {
 		ModelData: ModelData{
 			ID:          "openai/gpt-4o",
